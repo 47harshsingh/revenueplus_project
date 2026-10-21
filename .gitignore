@@ -19,3 +19,6 @@ node_modules/
 .DS_Store
 .vscode/
 .idea/
+
+# generated data (rebuilt from seed)
+data/out/
