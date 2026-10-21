@@ -1,0 +1,21 @@
+# secrets
+.env
+.env.local
+.env.*.local
+
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# node / next.js
+node_modules/
+.next/
+.vercel/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
