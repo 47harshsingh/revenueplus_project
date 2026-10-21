@@ -1,2 +1,6 @@
 fastapi==0.156.6
 uvicorn[standard]==0.54.0
+numpy==2.5.4
+pandas==3.0.6
+faker==40.43.0
+psycopg[binary]==3.3.6
