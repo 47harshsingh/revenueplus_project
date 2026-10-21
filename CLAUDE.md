@@ -39,6 +39,16 @@ Harsh is an aspiring data analyst, strong in SQL and Python/pandas, and **new** 
 - **Python dependencies:** `requirements.txt` + venv. Render runs Python 3.12 (`PYTHON_VERSION` env var).
 - **shadcn/ui:** deferred until the first real component needs it (M8).
 
+### Data decisions (made in M2)
+
+- **Load path:** the cloud container can't reach Supabase. `data/load.py` runs in a manual GitHub Actions workflow (`load.yml`), with `DATABASE_URL` stored as a GitHub secret. Everything is tested against local Postgres 16 in the container first.
+- **Supabase:** the project lives in US West, next to Render (Oregon). Use the **Session pooler** connection string: Direct is IPv6-only, and the Transaction pooler breaks psycopg prepared statements.
+- **Schema deviations from PROJECT_PLAN.md:**
+  - `fact_deals.furthest_stage` exists, because the funnel needs it.
+  - Deals are generated from 2025-01-01 as warm-up, while KPIs report from 2025-04-01.
+  - `dim_date` covers 2025-01-01 to 2027-12-31.
+- **RLS:** RLS is enabled on every table, which blocks Supabase's public REST API. Views (M3) run as their owner, so they are unaffected.
+
 ## Environment variables (`.env.example`)
 
 ```
