@@ -1,0 +1,35 @@
+# Rebuilds the Supabase database from scratch and loads the seeded synthetic data.
+# Manual only: Actions tab -> "Load data" -> Run workflow.
+name: Load data
+
+on:
+  workflow_dispatch:
+
+# Two clicks must never run overlapping rebuilds.
+concurrency:
+  group: load-data
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Gate: if the generator or its planted patterns are broken, nothing touches Supabase.
+      - name: Run tests
+        run: pytest -q
+
+      - name: Load data into Supabase
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m data.load
