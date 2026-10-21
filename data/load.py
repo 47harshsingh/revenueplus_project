@@ -52,9 +52,19 @@ def main() -> int:
         print("DATABASE_URL is not set", file=sys.stderr)
         return 1
 
+    try:
+        conn = psycopg.connect(url)
+    except (psycopg.ProgrammingError, psycopg.OperationalError) as e:
+        # Never echo the URL: it contains the password.
+        print("Could not connect with DATABASE_URL. It must be the Supabase *Session pooler* "
+              "URI: postgresql://USER:PASSWORD@HOST:5432/postgres (special characters in the "
+              "password URL-encoded).", file=sys.stderr)
+        print(f"Driver said: {type(e).__name__}: {str(e).splitlines()[0]}", file=sys.stderr)
+        return 1
+
     tables = generate()
     try:
-        with psycopg.connect(url) as conn:  # commits on success, rolls back on exception
+        with conn:  # commits on success, rolls back on exception
             with conn.cursor() as cur:
                 print("rebuilding schema ...")
                 cur.execute(SCHEMA_SQL.read_text())
