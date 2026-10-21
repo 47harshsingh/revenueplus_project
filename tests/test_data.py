@@ -92,3 +92,78 @@ def test_deterministic_for_same_seed(tables):
 def test_different_seed_differs(tables):
     other = generate(7)
     assert not tables["fact_deals"].equals(other["fact_deals"])
+
+
+# ---------- planted patterns: each must be measurable in the generated data ----------
+
+from data.generate import (  # noqa: E402
+    ANOMALIES, BASELINE_WINDOW_DAYS, WEAK_REP_IDS, daily_series, quarterly_win_rate,
+    rep_quarter_closed_won,
+)
+
+
+def gt_row(tables, metric, **match):
+    gt = tables["ground_truth"]
+    rows = gt[(gt.metric == metric) & (gt.kind == "pattern")]
+    for col, val in match.items():
+        rows = rows[rows[col] == val]
+    assert len(rows) == 1
+    return rows.iloc[0]
+
+
+def test_ground_truth_shape(tables):
+    gt = tables["ground_truth"]
+    assert len(gt) == 14
+    assert (gt.kind == "pattern").sum() == 4
+    assert (gt.kind == "anomaly").sum() == 10
+    assert gt.rep_id.dropna().isin(tables["dim_rep"].rep_id).all()
+
+
+def test_seasonality_q4_uplift_and_december_peak(tables):
+    assert 0.20 <= gt_row(tables, "closed_won_value").magnitude <= 0.40
+    d = tables["fact_deals"]
+    won = d[(d.is_won == True) & (d.closed_date >= "2025-04-01")]
+    by_month = won.groupby(won.closed_date.dt.to_period("M")).amount.sum()
+    assert by_month.idxmax() == pd.Period("2025-12")
+
+
+def test_west_q3_dip_only_in_west(tables):
+    assert -0.45 <= gt_row(tables, "win_rate", region="West").magnitude <= -0.25
+    wr = quarterly_win_rate(tables["fact_deals"], tables["dim_rep"])
+    q3 = pd.Period("2025Q3")
+    for region in ["North", "South", "East"]:
+        assert abs(wr.loc[q3, region] / wr[region].drop(q3).mean() - 1) < 0.15, region
+    # recovers: West Q4-2025 back within 15% of its non-dip average
+    west = wr["West"]
+    assert abs(west[pd.Period("2025Q4")] / west.drop(q3).mean() - 1) < 0.15
+
+
+def test_weak_reps_far_below_team(tables):
+    reps = tables["dim_rep"]
+    cw = rep_quarter_closed_won(tables["fact_deals"], reps)
+    att = (cw.closed_won / reps.quarterly_quota.iloc[0]).groupby(cw.rep_id).mean()
+    normal = att.drop(list(WEAK_REP_IDS))
+    assert 0.90 <= normal.mean() <= 1.00
+    weak_regions = reps.set_index("rep_id").loc[list(WEAK_REP_IDS)].region
+    assert weak_regions.nunique() == 2
+    for rep_id in WEAK_REP_IDS:
+        assert 0.45 <= att[rep_id] <= 0.65
+        assert att[rep_id] < normal.min()
+
+
+def test_anomalies_on_weekdays_and_measurable(tables):
+    deals, reps = tables["fact_deals"], tables["dim_rep"]
+    series = {m: daily_series(deals, reps, m) for m in {a[2] for a in ANOMALIES}}
+    for date, region, metric, direction in ANOMALIES:
+        day = pd.Timestamp(date)
+        assert day.dayofweek < 5, date
+        assert day - pd.Timedelta(days=BASELINE_WINDOW_DAYS) >= pd.Timestamp("2025-04-01")
+        s = series[metric][region]
+        window = s.loc[day - pd.Timedelta(days=BASELINE_WINDOW_DAYS): day - pd.Timedelta(days=1)]
+        med = window.median()
+        mad = (window - med).abs().median()
+        z = (s[day] - med) / (1.4826 * mad)
+        if direction == "spike":
+            assert z > 3.5, (date, region, z)
+        else:
+            assert s[day] == 0, (date, region)
