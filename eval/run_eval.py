@@ -75,19 +75,20 @@ class EvalAborted(Exception):
     """Every remaining question would fail the same way (bad model/key, daily quota gone)."""
 
 
-RATE_LIMIT_WAIT = 60.0  # per-minute free-tier windows: wait one full window
+RATE_LIMIT_WAIT = 60.0  # per-minute free-tier windows: wait one full window (unless Google says)
+MAX_RATE_LIMIT_WAIT = 120.0
 OTHER_RETRY_WAIT = 15.0  # 5xx, timeouts, malformed JSON
 
 
 def ask(question: str, llm, retries: int = 1, rate_limit_wait: float = RATE_LIMIT_WAIT,
-        other_wait: float = OTHER_RETRY_WAIT) -> dict:
+        other_wait: float = OTHER_RETRY_WAIT, narrate: bool = False) -> dict:
     """One question. A transient provider error (429 per-minute quota, 5xx, timeout, malformed
     JSON) is retried, then recorded as 'error' (excluded from accuracy, not counted as wrong).
     A config error (other 4xx) or an exhausted DAILY quota aborts the whole run instead of
     failing every remaining question the same way."""
     for attempt in range(retries + 1):
         try:
-            return answer_question(question, llm).model_dump()
+            return answer_question(question, llm, narrate=narrate).model_dump()
         except LLMUnavailable as e:
             if e.is_config_error:
                 raise EvalAborted(f"{e}: check the GEMINI_MODEL variable and GEMINI_API_KEY "
@@ -98,12 +99,16 @@ def ask(question: str, llm, retries: int = 1, rate_limit_wait: float = RATE_LIMI
             if attempt == retries:
                 return {"status": "error", "reason": str(e), "rows": [], "sql": None,
                         "answer": ""}
-            wait = rate_limit_wait if e.status == 429 else other_wait
+            if e.status == 429:  # Google's RetryInfo knows the window better than we do
+                wait = min(e.retry_after, MAX_RATE_LIMIT_WAIT) if e.retry_after else rate_limit_wait
+            else:
+                wait = other_wait
             print(f"    retry in {wait:.0f}s after: {e}", flush=True)
             time.sleep(wait)
 
 
-def run(questions: list[dict], llm, delay: float, on_result=None) -> list[dict]:
+def run(questions: list[dict], llm, delay: float, on_result=None,
+        narrate: bool = False) -> list[dict]:
     """Ask every question. on_result(results) is called after each one, so a run killed by a
     timeout still leaves everything answered so far on disk."""
     results, started = [], time.monotonic()
@@ -111,7 +116,7 @@ def run(questions: list[dict], llm, delay: float, on_result=None) -> list[dict]:
         if i:
             time.sleep(delay)  # free-tier rate limits (2 model calls per question)
         t0 = time.monotonic()
-        r = ask(q["question"], llm)
+        r = ask(q["question"], llm, narrate=narrate)
         ok = None if r["status"] == "error" else score(q["expected"], r)
         results.append({"id": q["id"], "type": q["type"], "question": q["question"],
                         "expected": q["expected"], "correct": ok, **r})
@@ -172,6 +177,8 @@ def main() -> int:
     ap.add_argument("--load", action="store_true", help="rebuild DATABASE_URL with seed data first")
     ap.add_argument("--delay", type=float, default=float(os.environ.get("EVAL_DELAY_SECONDS", 13)))
     ap.add_argument("--only", nargs="*", help="question ids to run (default: all)")
+    ap.add_argument("--narrate", action="store_true",
+                    help="also generate the 2-line summary (not scored; doubles model calls)")
     args = ap.parse_args()
 
     admin_url, chat_password = os.environ.get("DATABASE_URL"), os.environ.get("CHAT_DB_PASSWORD")
@@ -201,7 +208,7 @@ def main() -> int:
         return summary, md
 
     try:
-        results = run(questions, llm, args.delay, on_result=save)
+        results = run(questions, llm, args.delay, on_result=save, narrate=args.narrate)
     except EvalAborted as e:
         print(f"\nEVAL ABORTED: {e}", file=sys.stderr)
         return 1

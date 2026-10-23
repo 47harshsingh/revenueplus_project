@@ -209,3 +209,69 @@ def test_results_are_saved_after_every_question(no_prompt_db, monkeypatch):
     llm = FailingLLM(503)
     run(questions, llm, delay=0, on_result=lambda rs: snapshots.append(len(rs)))
     assert snapshots == [1, 2, 3]
+
+
+# ---------- Google's real 429 shape: the daily quota is named only in the details ----------
+
+DAILY_429 = {"error": {
+    "code": 429, "status": "RESOURCE_EXHAUSTED",
+    "message": "You exceeded your current quota, please check your plan and billing details.",
+    "details": [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+         "violations": [{"quotaMetric": "generativelanguage.googleapis.com/"
+                                        "generate_content_free_tier_requests",
+                         "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "43s"},
+    ]}}
+MINUTE_429 = {"error": {**DAILY_429["error"], "details": [
+    {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+     "violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7s"}]}}
+
+
+def gemini_raising(monkeypatch, payload):
+    """A real GeminiLLM whose network call raises Google's APIError with this payload."""
+    from google.genai import errors
+    from api.chat.llm import GeminiLLM
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-tests")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test-flash")
+    llm = GeminiLLM()
+
+    def boom(**kwargs):
+        raise errors.APIError(429, payload)
+    monkeypatch.setattr(llm.client.models, "generate_content", boom)
+    return llm
+
+
+def test_daily_quota_detected_from_details(monkeypatch, no_prompt_db):
+    llm = gemini_raising(monkeypatch, DAILY_429)
+    with _pytest.raises(LLMUnavailable) as exc:
+        llm.generate_text("s", "u")
+    assert exc.value.is_daily_quota and exc.value.retry_after == 43.0
+    assert "PerDay" in str(exc.value)  # the reason shows up in the eval log
+    with _pytest.raises(EvalAborted, match="DAILY quota"):
+        ask("q", llm, rate_limit_wait=0, other_wait=0)
+
+
+def test_per_minute_quota_waits_as_long_as_google_says(monkeypatch, no_prompt_db):
+    import eval.run_eval as runner
+    waits = []
+    monkeypatch.setattr(runner.time, "sleep", waits.append)
+    llm = gemini_raising(monkeypatch, MINUTE_429)
+    r = ask("q", llm)
+    assert r["status"] == "error" and waits == [7.0]
+
+
+def test_eval_skips_the_unscored_narrative_call(chat_pool):
+    class Counting(OracleLLM):
+        texts = 0
+
+        def generate_text(self, system, user):
+            Counting.texts += 1
+            return "x"
+
+    q = next(q for q in QUESTIONS if q["id"] == "q06")
+    run([q], Counting(), delay=0)
+    assert Counting.texts == 0           # default: 1 model call per question, not 2
+    run([q], Counting(), delay=0, narrate=True)
+    assert Counting.texts == 1
