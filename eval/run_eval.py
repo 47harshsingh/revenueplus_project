@@ -72,13 +72,19 @@ def chat_url(admin_url: str, chat_password: str) -> str:
 
 
 class EvalAborted(Exception):
-    """A configuration error (bad model name or key): every question would fail the same way."""
+    """Every remaining question would fail the same way (bad model/key, daily quota gone)."""
 
 
-def ask(question: str, llm, retries: int = 1, retry_wait: float = 30.0) -> dict:
-    """One question. A transient provider error (429 quota, 5xx, malformed JSON) is retried
-    once, then recorded as 'error' (excluded from accuracy, not counted as wrong). A config
-    error (other 4xx) aborts the whole run instead of failing 25 times the same way."""
+RATE_LIMIT_WAIT = 60.0  # per-minute free-tier windows: wait one full window
+OTHER_RETRY_WAIT = 15.0  # 5xx, timeouts, malformed JSON
+
+
+def ask(question: str, llm, retries: int = 1, rate_limit_wait: float = RATE_LIMIT_WAIT,
+        other_wait: float = OTHER_RETRY_WAIT) -> dict:
+    """One question. A transient provider error (429 per-minute quota, 5xx, timeout, malformed
+    JSON) is retried, then recorded as 'error' (excluded from accuracy, not counted as wrong).
+    A config error (other 4xx) or an exhausted DAILY quota aborts the whole run instead of
+    failing every remaining question the same way."""
     for attempt in range(retries + 1):
         try:
             return answer_question(question, llm).model_dump()
@@ -86,23 +92,34 @@ def ask(question: str, llm, retries: int = 1, retry_wait: float = 30.0) -> dict:
             if e.is_config_error:
                 raise EvalAborted(f"{e}: check the GEMINI_MODEL variable and GEMINI_API_KEY "
                                   "secret") from e
+            if e.is_daily_quota:
+                raise EvalAborted(f"{e}: the free-tier DAILY quota is used up; re-run tomorrow "
+                                  "or use --only for a few questions") from e
             if attempt == retries:
                 return {"status": "error", "reason": str(e), "rows": [], "sql": None,
                         "answer": ""}
-            time.sleep(retry_wait)
+            wait = rate_limit_wait if e.status == 429 else other_wait
+            print(f"    retry in {wait:.0f}s after: {e}", flush=True)
+            time.sleep(wait)
 
 
-def run(questions: list[dict], llm, delay: float) -> list[dict]:
-    results = []
+def run(questions: list[dict], llm, delay: float, on_result=None) -> list[dict]:
+    """Ask every question. on_result(results) is called after each one, so a run killed by a
+    timeout still leaves everything answered so far on disk."""
+    results, started = [], time.monotonic()
     for i, q in enumerate(questions):
         if i:
             time.sleep(delay)  # free-tier rate limits (2 model calls per question)
+        t0 = time.monotonic()
         r = ask(q["question"], llm)
         ok = None if r["status"] == "error" else score(q["expected"], r)
         results.append({"id": q["id"], "type": q["type"], "question": q["question"],
                         "expected": q["expected"], "correct": ok, **r})
         mark = {True: "PASS", False: "FAIL", None: "ERROR"}[ok]
-        print(f"{q['id']} {mark:5} {r['status']:8} {q['question'][:70]}", flush=True)
+        print(f"{q['id']} {mark:5} {r['status']:8} {time.monotonic() - t0:5.1f}s "
+              f"(total {time.monotonic() - started:5.0f}s)  {q['question'][:60]}", flush=True)
+        if on_result:
+            on_result(results)
     return results
 
 
@@ -175,19 +192,22 @@ def main() -> int:
     questions = yaml.safe_load(QUESTIONS.read_text())
     if args.only:
         questions = [q for q in questions if q["id"] in args.only]
+    def save(results: list[dict]) -> tuple[dict, str]:
+        summary = summarise(results, llm.model)
+        (HERE / "results.json").write_text(json.dumps({"summary": summary, "results": results},
+                                                      indent=2, default=str))
+        md = to_markdown(summary, results)
+        (HERE / "results.md").write_text(md)
+        return summary, md
+
     try:
-        results = run(questions, llm, args.delay)
+        results = run(questions, llm, args.delay, on_result=save)
     except EvalAborted as e:
         print(f"\nEVAL ABORTED: {e}", file=sys.stderr)
         return 1
     finally:
         db.close_pool()
-    summary = summarise(results, llm.model)
-
-    (HERE / "results.json").write_text(json.dumps({"summary": summary, "results": results},
-                                                  indent=2, default=str))
-    md = to_markdown(summary, results)
-    (HERE / "results.md").write_text(md)
+    summary, md = save(results)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write(md)

@@ -26,7 +26,15 @@ class LLMUnavailable(Exception):
         return self.status is not None and 400 <= self.status < 500 and self.status != 429
 
 
+    @property
+    def is_daily_quota(self) -> bool:
+        """429 for the per-day free-tier quota: it won't reset within one eval run."""
+        text = str(self).lower()
+        return self.status == 429 and ("per day" in text or "perday" in text)
+
+
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+REQUEST_TIMEOUT_MS = 30_000  # google-genai's HttpOptions.timeout is in MILLISECONDS
 
 
 def normalise_model(raw: str | None) -> str:
@@ -56,8 +64,10 @@ class GeminiLLM:
             raise LLMUnavailable("GEMINI_API_KEY / GEMINI_MODEL not configured")
         self.model = normalise_model(model)
         from google import genai  # imported lazily: tests with a fake LLM never need it
+        from google.genai import types
 
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key,
+                                   http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS))
 
     def _call(self, system: str, user: str, **config):
         from google.genai import errors, types
@@ -70,7 +80,11 @@ class GeminiLLM:
                                                    **config),
             )
         except errors.APIError as e:
-            raise LLMUnavailable(f"Gemini error {e.code}", status=e.code) from e
+            # Google's message says which limit was hit (per minute vs per day); keep it.
+            raise LLMUnavailable(f"Gemini error {e.code}: {(e.message or '')[:200]}",
+                                 status=e.code) from e
+        except Exception as e:  # timeouts and network errors: transient, no HTTP status
+            raise LLMUnavailable(f"Gemini request failed: {type(e).__name__}") from e
 
     def generate_json(self, system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         resp = self._call(system, user, response_mime_type="application/json",
