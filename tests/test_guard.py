@@ -71,6 +71,10 @@ MUST_REJECT = {
     "DO block": "DO $$ BEGIN DELETE FROM fact_deals; END $$",
     "CALL": "CALL refresh_kpis()",
     "INSERT via CTE": "WITH x AS (INSERT INTO anomalies DEFAULT VALUES RETURNING *) SELECT * FROM x",
+    # dangerous things hidden inside operators must still be caught
+    "pg_sleep inside AND": "SELECT 1 FROM v_as_of WHERE as_of IS NOT NULL AND pg_sleep(10) IS NULL",
+    "answer key inside EXISTS": "SELECT 1 FROM v_as_of WHERE EXISTS (SELECT 1 FROM ground_truth)",
+    "pg_read_file inside OR": "SELECT 1 FROM v_as_of WHERE false OR pg_read_file('/etc/passwd') = ''",
     # junk
     "empty": "   ",
     "not sql": "please give me the win rate",
@@ -105,6 +109,16 @@ MUST_ALLOW = {
                          "FROM v_monthly_region_kpis LIMIT 5",
     "lag": "SELECT month, win_rate, lag(win_rate) OVER (ORDER BY month) AS prev "
            "FROM v_monthly_region_kpis WHERE region = 'West'",
+    # everyday filters: sqlglot models these operators as Func nodes (missed until /chat tests)
+    "AND": "SELECT win_rate FROM v_monthly_region_kpis WHERE region = 'West' AND month = '2025-08-01'",
+    "OR + NOT": "SELECT count(*) FROM v_deal_facts WHERE NOT (region = 'West' OR region = 'East')",
+    "IN + BETWEEN + LIKE": "SELECT rep_name FROM v_deal_facts WHERE region IN ('North', 'South') "
+                           "AND amount BETWEEN 1000 AND 5000 AND rep_name LIKE 'D%' LIMIT 5",
+    "CASE WHEN + arithmetic": "SELECT CASE WHEN amount > 50000 THEN 'big' ELSE 'small' END AS size, "
+                              "count(*), sum(amount) / 1000.0 AS k FROM v_deal_facts GROUP BY 1",
+    "EXISTS on a view": "SELECT rep_id FROM v_quota_attainment q WHERE EXISTS (SELECT 1 FROM "
+                        "v_deal_facts d WHERE d.rep_id = q.rep_id AND d.is_won) LIMIT 5",
+    "regex match": "SELECT DISTINCT rep_name FROM v_deal_facts WHERE rep_name ~ '^D'",
 }
 
 

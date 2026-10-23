@@ -6,3 +6,4 @@ faker==40.43.0
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 sqlglot==30.24.0
+google-genai==2.33.0

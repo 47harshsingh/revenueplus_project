@@ -127,6 +127,10 @@ def check_sql(text: str) -> str:
             raise GuardRejected(f"table '{name}' is not allowed")
 
     for func in tree.find_all(exp.Func):
+        # sqlglot models operators (AND, OR, EXISTS, ~, JSON/array ops) as Func nodes too.
+        # They aren't calls; their operands are still walked by find_all and checked here.
+        if isinstance(func, (exp.Connector, exp.Binary, exp.Unary, exp.Predicate)):
+            continue
         fname = _function_name(func)
         if fname not in ALLOWED_FUNCTIONS:
             raise GuardRejected(f"function '{fname}' is not allowed")
