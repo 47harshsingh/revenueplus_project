@@ -71,13 +71,21 @@ def chat_url(admin_url: str, chat_password: str) -> str:
                             "password": chat_password})
 
 
+class EvalAborted(Exception):
+    """A configuration error (bad model name or key): every question would fail the same way."""
+
+
 def ask(question: str, llm, retries: int = 1, retry_wait: float = 30.0) -> dict:
-    """One question; a provider error (e.g. 429 quota) is retried once, then recorded as
-    'error', which is excluded from accuracy rather than counted as a wrong answer."""
+    """One question. A transient provider error (429 quota, 5xx, malformed JSON) is retried
+    once, then recorded as 'error' (excluded from accuracy, not counted as wrong). A config
+    error (other 4xx) aborts the whole run instead of failing 25 times the same way."""
     for attempt in range(retries + 1):
         try:
             return answer_question(question, llm).model_dump()
         except LLMUnavailable as e:
+            if e.is_config_error:
+                raise EvalAborted(f"{e}: check the GEMINI_MODEL variable and GEMINI_API_KEY "
+                                  "secret") from e
             if attempt == retries:
                 return {"status": "error", "reason": str(e), "rows": [], "sql": None,
                         "answer": ""}
@@ -167,9 +175,14 @@ def main() -> int:
     questions = yaml.safe_load(QUESTIONS.read_text())
     if args.only:
         questions = [q for q in questions if q["id"] in args.only]
-    results = run(questions, llm, args.delay)
+    try:
+        results = run(questions, llm, args.delay)
+    except EvalAborted as e:
+        print(f"\nEVAL ABORTED: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close_pool()
     summary = summarise(results, llm.model)
-    db.close_pool()
 
     (HERE / "results.json").write_text(json.dumps({"summary": summary, "results": results},
                                                   indent=2, default=str))
@@ -179,6 +192,9 @@ def main() -> int:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write(md)
     print("\n" + md)
+    if summary["scored"] == 0:  # all transient errors: don't let the workflow look green
+        print("No question could be scored (all errored).", file=sys.stderr)
+        return 1
     return 0
 
 
