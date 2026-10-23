@@ -100,7 +100,7 @@ The wrong answer is 62% too high, because it gives 283 Enterprise deals the same
 
   | Points | Rule |
   |---|---|
-  | +40 | no activity on any of the account's deals in the last **60 days** |
+  | +40 | **more than 60 days** since the last activity on any of the account's deals, or no activity ever |
   | +30 | the account's **last 2 closed deals** (by `closed_date`) were both lost |
   | +30 | the account's **last 3 deals** (by `created_date`) have strictly decreasing amounts |
 
@@ -123,4 +123,6 @@ Refresh them with:
 SELECT refresh_kpis();
 ```
 
-`data/load.py` refreshes them after every load. The daily job (M7) calls the same function.
+`data/load.py` recreates them from scratch on every load, so they're fresh after it. The daily job (M7)
+must call `refresh_kpis()` after appending data. `tests/test_kpis.py` proves that a change is
+invisible until the refresh, and visible after it.

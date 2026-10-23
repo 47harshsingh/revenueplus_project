@@ -19,7 +19,7 @@ from data.generate import generate
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_SQL = ROOT / "db" / "01_schema.sql"
-VIEW_SQL = [ROOT / "db" / "02_views.sql"]  # applied in order, after the data is in
+VIEW_SQL = [ROOT / "db" / "02_views.sql", ROOT / "db" / "03_matviews.sql"]  # in order, after data
 SANITY_SQL = Path(__file__).parent / "sanity.sql"
 
 # FK order: dimensions before facts, deals before activities.

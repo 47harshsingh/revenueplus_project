@@ -146,3 +146,80 @@ def test_empty_segment_gives_null_not_error(conn):
         cur.execute("""SELECT won_count::numeric / NULLIF(won_count + lost_count, 0)
                        FROM (SELECT 0 AS won_count, 0 AS lost_count) x""")
         assert cur.fetchone()[0] is None
+
+
+# ---------- materialized views ----------
+
+FUNNEL_COLS = ["deals_created", "reached_prospecting", "reached_qualified", "reached_proposal",
+               "reached_negotiation", "reached_won", "conv_prospecting_to_qualified",
+               "conv_qualified_to_proposal", "conv_proposal_to_negotiation",
+               "conv_negotiation_to_won"]
+
+
+def test_funnel_match_pandas(conn, tables):
+    sql = sql_df(conn, "SELECT * FROM mv_funnel_monthly")
+    assert len(sql) == 18 * 4
+    assert_close(sql, ref.funnel_monthly(tables), ["month", "region"], FUNNEL_COLS)
+
+
+def test_funnel_is_monotonic(conn):
+    """You can't reach a later stage without passing the earlier ones."""
+    bad = sql_df(conn, """SELECT count(*) AS n FROM mv_funnel_monthly
+                          WHERE NOT (deals_created = reached_prospecting
+                                 AND reached_prospecting >= reached_qualified
+                                 AND reached_qualified   >= reached_proposal
+                                 AND reached_proposal    >= reached_negotiation
+                                 AND reached_negotiation >= reached_won)""").n.iloc[0]
+    assert bad == 0
+
+
+def test_funnel_worked_example(conn):
+    jan = sql_df(conn, """SELECT sum(reached_prospecting) p, sum(reached_qualified) q,
+                                 sum(reached_proposal) pr, sum(reached_negotiation) n,
+                                 sum(reached_won) w
+                          FROM mv_funnel_monthly WHERE month = '2026-01-01'""").iloc[0]
+    assert [int(x) for x in jan] == [597, 502, 369, 249, 153]  # METRICS.md example
+
+
+VELOCITY_COLS = ["open_deals", "open_pipeline_value", "win_rate_180d", "avg_deal_size_180d",
+                 "avg_sales_cycle_days_180d", "velocity_per_day"]
+
+
+def test_pipeline_velocity_match_pandas(conn, tables):
+    sql = sql_df(conn, "SELECT * FROM mv_pipeline_velocity")
+    assert set(sql.region) == {"North", "South", "East", "West", "All"}
+    assert_close(sql, ref.pipeline_velocity(tables), ["region"], VELOCITY_COLS)
+    all_row = sql.set_index("region").loc["All"]
+    assert int(all_row.open_deals) == 965                                # METRICS.md example
+    assert abs(float(all_row.velocity_per_day) - 183399.18) < 0.01
+
+
+def test_churn_risk_match_pandas(conn, tables):
+    sql = sql_df(conn, "SELECT * FROM mv_churn_risk")
+    expected = ref.churn_risk(tables)
+    assert len(sql) == 600
+    merged = sql.merge(expected, on="account_id", suffixes=("_sql", "_pd"))
+    for col in ["inactive_60d", "last_two_lost", "declining_deal_size", "churn_risk_score"]:
+        mismatch = merged[merged[f"{col}_sql"] != merged[f"{col}_pd"]]
+        assert mismatch.empty, f"{col}: {len(mismatch)} accounts differ"
+
+
+def test_churn_distribution_matches_metrics_md(conn):
+    dist = sql_df(conn, """SELECT churn_risk_score AS s, count(*) AS n FROM mv_churn_risk
+                           GROUP BY 1 ORDER BY 1""")
+    assert dict(zip(dist.s, dist.n)) == {0: 219, 30: 317, 40: 8, 60: 40, 70: 15, 100: 1}
+
+
+def test_refresh_kpis_picks_up_changes(conn):
+    """A materialized view is stale until refreshed; refresh_kpis() must update all of them."""
+    q = "SELECT open_pipeline_value FROM mv_pipeline_velocity WHERE region = 'All'"
+    before = sql_df(conn, q).iloc[0, 0]
+    with conn.transaction(force_rollback=True):  # undo everything afterwards
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE fact_deals SET amount = amount + 1000000
+                           WHERE deal_id = (SELECT min(deal_id) FROM fact_deals
+                                            WHERE closed_date IS NULL)""")
+        assert sql_df(conn, q).iloc[0, 0] == before            # stale: not refreshed yet
+        with conn.cursor() as cur:
+            cur.execute("SELECT refresh_kpis()")
+        assert sql_df(conn, q).iloc[0, 0] == before + 1000000  # refreshed
