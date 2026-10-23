@@ -147,14 +147,14 @@ def no_prompt_db(monkeypatch):
 def test_config_errors_abort_immediately_without_retry(no_prompt_db, status):
     llm = FailingLLM(status)
     with _pytest.raises(EvalAborted, match="GEMINI_MODEL"):
-        ask("q", llm, retry_wait=0)
+        ask("q", llm, rate_limit_wait=0, other_wait=0)
     assert llm.calls == 1
 
 
 @_pytest.mark.parametrize("status", [429, 500, 503, None])
 def test_transient_errors_retry_once_then_record_error(no_prompt_db, status):
     llm = FailingLLM(status)
-    r = ask("q", llm, retry_wait=0)
+    r = ask("q", llm, rate_limit_wait=0, other_wait=0)
     assert r["status"] == "error" and llm.calls == 2
 
 
@@ -173,3 +173,39 @@ def test_model_name_is_normalised(raw, expected):
 def test_pasted_code_is_rejected_with_a_clear_message(raw):
     with _pytest.raises(LLMUnavailable, match="bare model id"):
         normalise_model(raw)
+
+
+class MessageLLM(FailingLLM):
+    def __init__(self, status, message):
+        super().__init__(status)
+        self.message = message
+
+    def generate_json(self, system, user, schema):
+        self.calls += 1
+        raise LLMUnavailable(f"Gemini error {self.statuses[0]}: {self.message}",
+                             status=self.statuses[0])
+
+
+def test_daily_quota_aborts_instead_of_retrying(no_prompt_db):
+    llm = MessageLLM(429, "Quota exceeded for metric: generate_content_free_tier_requests, "
+                          "limit: 50, per day")
+    with _pytest.raises(EvalAborted, match="DAILY quota"):
+        ask("q", llm, rate_limit_wait=0, other_wait=0)
+    assert llm.calls == 1
+
+
+def test_per_minute_quota_is_retried(no_prompt_db):
+    llm = MessageLLM(429, "Quota exceeded for metric: requests per minute")
+    assert ask("q", llm, rate_limit_wait=0, other_wait=0)["status"] == "error"
+    assert llm.calls == 2
+
+
+def test_results_are_saved_after_every_question(no_prompt_db, monkeypatch):
+    """A run killed by the job timeout must still leave what it already answered."""
+    import eval.run_eval as runner
+    monkeypatch.setattr(runner.time, "sleep", lambda s: None)
+    snapshots = []
+    questions = [q for q in QUESTIONS if q["expected"].get("refused")][:3]
+    llm = FailingLLM(503)
+    run(questions, llm, delay=0, on_result=lambda rs: snapshots.append(len(rs)))
+    assert snapshots == [1, 2, 3]

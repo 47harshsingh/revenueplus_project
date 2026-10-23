@@ -11,6 +11,10 @@ on:
         description: "Question ids to run, space-separated (blank = all 25)"
         required: false
         default: ""
+      delay:
+        description: "Seconds between questions (raise if you hit rate limits)"
+        required: false
+        default: "13"
 
 concurrency:
   group: eval
@@ -19,7 +23,7 @@ concurrency:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -53,7 +57,9 @@ jobs:
           CHAT_DB_PASSWORD: eval-only-throwaway
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-        run: python -m eval.run_eval --load ${{ inputs.only && format('--only {0}', inputs.only) || '' }}
+        run: >-
+          python -m eval.run_eval --load --delay "${{ inputs.delay || '13' }}"
+          ${{ inputs.only && format('--only {0}', inputs.only) || '' }}
 
       - name: Upload results
         if: always()
