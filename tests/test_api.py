@@ -37,8 +37,10 @@ def client():
 @pytest.fixture
 def no_db_client(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    saved = db.pool  # the lifespan below resets the shared pool; restore it for later tests
     with TestClient(app) as c:
         yield c
+    db.pool = saved
 
 
 # ---------- no database ----------
@@ -127,3 +129,81 @@ def test_pool_connections_are_read_only(client):
     with db.pool.connection() as conn:
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             conn.execute("DELETE FROM fact_deals")
+
+
+# ---------- /funnel ----------
+
+@needs_db
+def test_funnel_january_2026_matches_metrics_md(client):
+    f = client.get("/funnel", params={"start": "2026-01-01", "end": "2026-01-31"}).json()
+    assert f["deals_created"] == 597
+    assert [s["reached"] for s in f["stages"]] == [597, 502, 369, 249, 153]
+    assert f["stages"][0]["conversion_from_previous"] is None
+    assert abs(f["stages"][1]["conversion_from_previous"] - 502 / 597) < 0.001
+
+
+@needs_db
+def test_funnel_bad_range_is_422(client):
+    assert client.get("/funnel", params={"start": "2026-02-01", "end": "2026-01-01"}).status_code == 422
+
+
+# ---------- /reps ----------
+
+@needs_db
+def test_reps_list(client):
+    reps = client.get("/reps").json()
+    assert len(reps) == 20
+    weakest = sorted(reps, key=lambda r: r["avg_attainment"])[:2]
+    assert {r["rep_id"] for r in weakest} == {4, 12}  # the planted weak reps
+    assert all(r["latest_quarter"] == "2026-07-01" for r in reps)
+
+
+@needs_db
+def test_rep_detail_vs_team(client):
+    r = client.get("/reps/4").json()
+    assert r["rep"]["region"] == "North"
+    assert abs(r["rep"]["avg_attainment"] - 0.6129) < 0.001  # ground truth
+    assert len(r["quarters"]) == 6
+    q3 = next(q for q in r["quarters"] if q["quarter"] == "2025-07-01")
+    assert abs(q3["rep_attainment"] - 0.6531) < 0.001  # METRICS.md example
+    assert r["win_rate"] < r["team_win_rate"]
+
+
+@needs_db
+@pytest.mark.parametrize("rep_id", ["99999", "0", "-1", "99999999999999999999"])
+def test_unknown_or_out_of_range_rep(client, rep_id):
+    expected = 404 if rep_id == "99999" else 422
+    assert client.get(f"/reps/{rep_id}").status_code == expected
+
+
+def test_non_numeric_rep_is_422(no_db_client):
+    assert no_db_client.get("/reps/abc").status_code == 422
+
+
+# ---------- /anomalies ----------
+
+@needs_db
+def test_anomalies_empty_until_detector_runs(client):
+    r = client.get("/anomalies")
+    assert r.status_code == 200 and r.json() == []
+
+
+@needs_db
+def test_anomalies_newest_first_and_limit(client):
+    with psycopg.connect(TEST_DB) as conn:  # write directly: the API's pool is read-only
+        conn.execute("""INSERT INTO anomalies (detected_on, metric_date, metric, segment,
+                                               value, baseline, score)
+                        VALUES ('2026-09-30', '2026-08-19', 'new_pipeline_value', 'East', 1, 1, 9),
+                               ('2026-09-30', '2026-05-06', 'closed_won_value', 'West', 1, 1, 8),
+                               ('2026-09-30', '2026-06-17', 'new_pipeline_value', 'North', 1, 1, -4)""")
+    try:
+        rows = client.get("/anomalies", params={"limit": 2}).json()
+        assert [r["metric_date"] for r in rows] == ["2026-08-19", "2026-06-17"]
+    finally:
+        with psycopg.connect(TEST_DB) as conn:
+            conn.execute("DELETE FROM anomalies")
+
+
+@pytest.mark.parametrize("limit", ["0", "101", "500", "ten"])
+def test_anomalies_bad_limit_is_422(no_db_client, limit):
+    assert no_db_client.get("/anomalies", params={"limit": limit}).status_code == 422

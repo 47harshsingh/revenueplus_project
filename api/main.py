@@ -9,7 +9,7 @@ from psycopg_pool import PoolTimeout
 
 from api import db
 from api.models import HealthResponse
-from api.routers import kpis
+from api.routers import anomalies, funnel, kpis, reps
 
 
 @asynccontextmanager
@@ -50,4 +50,5 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-app.include_router(kpis.router)
+for router in (kpis.router, funnel.router, reps.router, anomalies.router):
+    app.include_router(router)

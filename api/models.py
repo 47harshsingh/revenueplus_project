@@ -61,3 +61,52 @@ class TrendResponse(BaseModel):
     grain: Grain
     region: Region | None
     points: list[TrendPoint]
+
+
+class FunnelStage(BaseModel):
+    stage: str
+    reached: int
+    conversion_from_previous: float | None  # null for the first stage
+
+
+class FunnelResponse(BaseModel):
+    period: Period
+    region: Region | None
+    deals_created: int
+    stages: list[FunnelStage]
+
+
+class RepSummary(BaseModel):
+    rep_id: int
+    rep_name: str
+    region: Region
+    quarterly_quota: float
+    avg_attainment: float | None          # mean over complete quarters
+    latest_quarter: date | None           # latest complete quarter
+    latest_quarter_attainment: float | None
+
+
+class RepQuarter(BaseModel):
+    quarter: date
+    rep_attainment: float
+    team_avg_attainment: float | None     # whole team incl. this rep: total won / total quota
+
+
+class RepDetail(BaseModel):
+    rep: RepSummary
+    won_count: int
+    lost_count: int
+    win_rate: float | None
+    team_win_rate: float | None
+    quarters: list[RepQuarter]
+
+
+class Anomaly(BaseModel):
+    id: int
+    detected_on: date
+    metric_date: date
+    metric: str
+    segment: str
+    value: float
+    baseline: float
+    score: float
