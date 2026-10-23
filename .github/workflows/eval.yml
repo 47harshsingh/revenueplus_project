@@ -1,0 +1,66 @@
+# Runs the 25-question chatbot eval against a throwaway Postgres loaded with the seeded data.
+# Manual only: Actions tab -> "Eval chatbot" -> Run workflow.
+# Needs: secret GEMINI_API_KEY, variable GEMINI_MODEL (a variable, not a secret, so the model
+# name is visible in the results instead of masked as ***).
+name: Eval chatbot
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Question ids to run, space-separated (blank = all 25)"
+        required: false
+        default: ""
+
+concurrency:
+  group: eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres   # throwaway, exists only inside this job
+          POSTGRES_DB: revenuepulse_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run eval
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/revenuepulse_eval
+          CHAT_DB_PASSWORD: eval-only-throwaway
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: python -m eval.run_eval --load ${{ inputs.only && format('--only {0}', inputs.only) || '' }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: |
+            eval/results.json
+            eval/results.md
+          if-no-files-found: ignore

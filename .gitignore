@@ -22,3 +22,7 @@ node_modules/
 
 # generated data (rebuilt from seed)
 data/out/
+
+# eval run outputs (the baseline is recorded in EVALS.md)
+eval/results.json
+eval/results.md
