@@ -115,3 +115,61 @@ def test_perfect_model_scores_25_of_25(chat_pool):
 def test_useless_model_scores_near_zero(chat_pool):
     s = summarise(run(QUESTIONS, UselessLLM(), delay=0), "useless")
     assert s["correct"] == 0  # the scorer isn't trivially generous
+
+
+# ---------- provider errors ----------
+
+import pytest as _pytest  # noqa: E402
+
+from api.chat.llm import LLMUnavailable, normalise_model  # noqa: E402
+from eval.run_eval import EvalAborted, ask  # noqa: E402
+
+
+class FailingLLM:
+    def __init__(self, *statuses):
+        self.statuses, self.calls = list(statuses), 0
+
+    def generate_json(self, system, user, schema):
+        self.calls += 1
+        raise LLMUnavailable("boom", status=self.statuses[min(self.calls - 1, len(self.statuses) - 1)])
+
+    def generate_text(self, system, user):
+        return ""
+
+
+@_pytest.fixture
+def no_prompt_db(monkeypatch):
+    """ask() builds the prompt first; stub it so these tests need no database."""
+    monkeypatch.setattr(prompt, "sql_system_prompt", lambda: "system")
+
+
+@_pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_config_errors_abort_immediately_without_retry(no_prompt_db, status):
+    llm = FailingLLM(status)
+    with _pytest.raises(EvalAborted, match="GEMINI_MODEL"):
+        ask("q", llm, retry_wait=0)
+    assert llm.calls == 1
+
+
+@_pytest.mark.parametrize("status", [429, 500, 503, None])
+def test_transient_errors_retry_once_then_record_error(no_prompt_db, status):
+    llm = FailingLLM(status)
+    r = ask("q", llm, retry_wait=0)
+    assert r["status"] == "error" and llm.calls == 2
+
+
+@_pytest.mark.parametrize("raw, expected", [
+    ("gemini-x-flash", "gemini-x-flash"),
+    ("  gemini-x-flash \n", "gemini-x-flash"),
+    ("models/gemini-x-flash", "gemini-x-flash"),
+    ("'gemini-x-flash'", "gemini-x-flash"),
+    ('"models/gemini-2.0-flash-001"', "gemini-2.0-flash-001"),
+])
+def test_model_name_is_normalised(raw, expected):
+    assert normalise_model(raw) == expected
+
+
+@_pytest.mark.parametrize("raw", [" model='models/gemini-3.8-flash'", "model=gemini", "gemini flash", ""])
+def test_pasted_code_is_rejected_with_a_clear_message(raw):
+    with _pytest.raises(LLMUnavailable, match="bare model id"):
+        normalise_model(raw)

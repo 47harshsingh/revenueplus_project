@@ -2,6 +2,7 @@
 model versions often. Groq fallback arrives in M6 behind the same two methods."""
 
 import os
+import re
 from collections.abc import Callable
 from typing import Protocol
 
@@ -9,7 +10,38 @@ from pydantic import BaseModel
 
 
 class LLMUnavailable(Exception):
-    """No API key/model configured, or the provider failed (quota, outage, bad model name)."""
+    """No API key/model configured, or the provider failed (quota, outage, bad model name).
+
+    status is the provider's HTTP status when there is one: 429/5xx are worth retrying,
+    other 4xx (bad model name, bad key) are configuration errors that never fix themselves.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def is_config_error(self) -> bool:
+        """4xx other than 429: wrong model name, bad key, no access. Retrying can't help."""
+        return self.status is not None and 400 <= self.status < 500 and self.status != 429
+
+
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def normalise_model(raw: str | None) -> str:
+    """Turn GEMINI_MODEL into a bare model id, or fail with a message saying what's wrong.
+
+    Tolerates surrounding whitespace/quotes and a 'models/' prefix; rejects pasted code
+    such as model='models/gemini-x-flash'.
+    """
+    value = (raw or "").strip().strip("'\"").strip()
+    if value.startswith("models/"):
+        value = value[len("models/"):]
+    if not MODEL_ID.match(value):
+        raise LLMUnavailable("GEMINI_MODEL must be a bare model id like gemini-...-flash "
+                             "(no 'model=', quotes or spaces)")
+    return value
 
 
 class LLM(Protocol):
@@ -19,9 +51,10 @@ class LLM(Protocol):
 
 class GeminiLLM:
     def __init__(self) -> None:
-        api_key, self.model = os.environ.get("GEMINI_API_KEY"), os.environ.get("GEMINI_MODEL")
-        if not api_key or not self.model:
+        api_key, model = os.environ.get("GEMINI_API_KEY"), os.environ.get("GEMINI_MODEL")
+        if not api_key or not model:
             raise LLMUnavailable("GEMINI_API_KEY / GEMINI_MODEL not configured")
+        self.model = normalise_model(model)
         from google import genai  # imported lazily: tests with a fake LLM never need it
 
         self.client = genai.Client(api_key=api_key)
@@ -37,7 +70,7 @@ class GeminiLLM:
                                                    **config),
             )
         except errors.APIError as e:
-            raise LLMUnavailable(f"Gemini error {e.code}") from e
+            raise LLMUnavailable(f"Gemini error {e.code}", status=e.code) from e
 
     def generate_json(self, system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         resp = self._call(system, user, response_mime_type="application/json",
