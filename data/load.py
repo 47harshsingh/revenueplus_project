@@ -1,6 +1,7 @@
 """Rebuild the database from scratch and load the seeded synthetic data.
 
-Everything runs in ONE transaction: schema rebuild, COPY of every table, sanity checks.
+Everything runs in ONE transaction: schema rebuild, COPY of every table, KPI views,
+sanity checks.
 Any failure (including a failed sanity check) rolls the whole thing back, so the
 database is never left half-loaded.
 
@@ -18,6 +19,7 @@ from data.generate import generate
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_SQL = ROOT / "db" / "01_schema.sql"
+VIEW_SQL = [ROOT / "db" / "02_views.sql"]  # applied in order, after the data is in
 SANITY_SQL = Path(__file__).parent / "sanity.sql"
 
 # FK order: dimensions before facts, deals before activities.
@@ -46,6 +48,43 @@ def copy_table(cur: psycopg.Cursor, table: str, df: pd.DataFrame) -> None:
             copy.write_row(row)
 
 
+def load_all(conn: psycopg.Connection, tables: dict[str, pd.DataFrame]) -> None:
+    """Rebuild schema, load every table, create KPI views, run sanity checks.
+
+    Runs on the caller's transaction and raises SanityCheckFailed on any mismatch, so
+    the caller decides whether to commit. Tests reuse this to build their database.
+    """
+    with conn.cursor() as cur:
+        print("rebuilding schema ...")
+        cur.execute(SCHEMA_SQL.read_text())
+
+        for table in LOAD_ORDER:
+            copy_table(cur, table, tables[table])
+            cur.execute(f"SELECT count(*) FROM {table}")
+            loaded = cur.fetchone()[0]
+            expected = len(tables[table])
+            print(f"  {table:16} {loaded:>7,} rows")
+            if loaded != expected:
+                raise SanityCheckFailed(f"{table}: loaded {loaded}, generated {expected}")
+
+        for path in VIEW_SQL:
+            print(f"applying {path.name} ...")
+            cur.execute(path.read_text())
+
+        print("\nsanity checks:")
+        cur.execute(SANITY_SQL.read_text())
+        failed = []
+        for name, actual, expected in cur.fetchall():
+            ok = actual == expected
+            print(f"  {'PASS' if ok else 'FAIL'}  {name:36} {actual} (expected {expected})")
+            if not ok:
+                failed.append(name)
+        if failed:
+            raise SanityCheckFailed(f"{len(failed)} sanity check(s) failed: {failed}")
+
+        cur.execute("ANALYZE")  # fresh planner statistics after a bulk load
+
+
 def main() -> int:
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -62,34 +101,9 @@ def main() -> int:
         print(f"Driver said: {type(e).__name__}: {str(e).splitlines()[0]}", file=sys.stderr)
         return 1
 
-    tables = generate()
     try:
         with conn:  # commits on success, rolls back on exception
-            with conn.cursor() as cur:
-                print("rebuilding schema ...")
-                cur.execute(SCHEMA_SQL.read_text())
-
-                for table in LOAD_ORDER:
-                    copy_table(cur, table, tables[table])
-                    cur.execute(f"SELECT count(*) FROM {table}")
-                    loaded = cur.fetchone()[0]
-                    expected = len(tables[table])
-                    print(f"  {table:16} {loaded:>7,} rows")
-                    if loaded != expected:
-                        raise SanityCheckFailed(f"{table}: loaded {loaded}, generated {expected}")
-
-                print("\nsanity checks:")
-                cur.execute(SANITY_SQL.read_text())
-                failed = []
-                for name, actual, expected in cur.fetchall():
-                    ok = actual == expected
-                    print(f"  {'PASS' if ok else 'FAIL'}  {name:36} {actual} (expected {expected})")
-                    if not ok:
-                        failed.append(name)
-                if failed:
-                    raise SanityCheckFailed(f"{len(failed)} sanity check(s) failed: {failed}")
-
-                cur.execute("ANALYZE")  # fresh planner statistics after a bulk load
+            load_all(conn, generate())
     except SanityCheckFailed as e:
         print(f"\nLOAD ROLLED BACK: {e}", file=sys.stderr)
         return 1
