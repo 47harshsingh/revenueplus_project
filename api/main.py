@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 
 from api import db
+from api.chat.llm import LLMUnavailable
 from api.models import HealthResponse
-from api.routers import anomalies, funnel, kpis, reps
+from api.routers import anomalies, chat, funnel, kpis, reps
 
 
 @asynccontextmanager
@@ -44,11 +45,17 @@ async def database_unavailable(request: Request, exc: Exception) -> JSONResponse
     return JSONResponse(status_code=503, content={"detail": "database unavailable"})
 
 
+# Gemini not configured, out of quota or down -> 503; the M6 Groq fallback will absorb most.
+@app.exception_handler(LLMUnavailable)
+async def llm_unavailable(request: Request, exc: LLMUnavailable) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": "AI model unavailable"})
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     # No database call: this must answer even when the DB is down or asleep.
     return HealthResponse(status="ok")
 
 
-for router in (kpis.router, funnel.router, reps.router, anomalies.router):
+for router in (kpis.router, funnel.router, reps.router, anomalies.router, chat.router):
     app.include_router(router)
