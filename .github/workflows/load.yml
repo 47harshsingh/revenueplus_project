@@ -32,4 +32,5 @@ jobs:
       - name: Load data into Supabase
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CHAT_DB_PASSWORD: ${{ secrets.CHAT_DB_PASSWORD }}  # empty if unset: password left unchanged
         run: python -m data.load
