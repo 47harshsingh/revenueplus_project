@@ -16,9 +16,12 @@ class LLMUnavailable(Exception):
     other 4xx (bad model name, bad key) are configuration errors that never fix themselves.
     """
 
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None,
+                 quota_ids: tuple[str, ...] = (), retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.quota_ids = quota_ids      # e.g. GenerateRequestsPerDayPerProjectPerModel-FreeTier
+        self.retry_after = retry_after  # seconds, from Google's RetryInfo, if given
 
     @property
     def is_config_error(self) -> bool:
@@ -28,9 +31,27 @@ class LLMUnavailable(Exception):
 
     @property
     def is_daily_quota(self) -> bool:
-        """429 for the per-day free-tier quota: it won't reset within one eval run."""
-        text = str(self).lower()
+        """429 for the per-day free-tier quota: it won't reset within one eval run. Google
+        often names it only in the error details (quotaId ...PerDay...), not the message."""
+        text = " ".join((str(self), *self.quota_ids)).lower()
         return self.status == 429 and ("per day" in text or "perday" in text)
+
+
+def _quota_info(details) -> tuple[tuple[str, ...], float | None]:
+    """Pull quota ids and the suggested retry delay out of a Google API error payload."""
+    items = ((details or {}).get("error") or {}).get("details") or []
+    quota_ids, retry_after = [], None
+    for item in items if isinstance(items, list) else []:
+        for v in item.get("violations") or []:
+            if v.get("quotaId"):
+                quota_ids.append(v["quotaId"])
+        delay = item.get("retryDelay")
+        if isinstance(delay, str) and delay.endswith("s"):
+            try:
+                retry_after = float(delay[:-1])
+            except ValueError:
+                pass
+    return tuple(quota_ids), retry_after
 
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -80,9 +101,12 @@ class GeminiLLM:
                                                    **config),
             )
         except errors.APIError as e:
-            # Google's message says which limit was hit (per minute vs per day); keep it.
-            raise LLMUnavailable(f"Gemini error {e.code}: {(e.message or '')[:200]}",
-                                 status=e.code) from e
+            # Keep which limit was hit (per minute vs per day) and Google's suggested wait.
+            quota_ids, retry_after = _quota_info(getattr(e, "details", None))
+            quota = f" [quota: {', '.join(quota_ids)}]" if quota_ids else ""
+            raise LLMUnavailable(f"Gemini error {e.code}: {(e.message or '')[:200]}{quota}",
+                                 status=e.code, quota_ids=quota_ids,
+                                 retry_after=retry_after) from e
         except Exception as e:  # timeouts and network errors: transient, no HTTP status
             raise LLMUnavailable(f"Gemini request failed: {type(e).__name__}") from e
 

@@ -37,7 +37,9 @@ def _jsonable(value):
     return value
 
 
-def answer_question(question: str, llm: LLM) -> ChatResult:
+def answer_question(question: str, llm: LLM, narrate: bool = True) -> ChatResult:
+    """narrate=False skips the 2-line summary call: the eval doesn't score it, and skipping
+    it halves the model requests per question (free-tier quotas are small)."""
     plan = llm.generate_json(prompt.sql_system_prompt(), question, prompt.SqlPlan)
 
     if plan.refuse_reason or not plan.sql:
@@ -67,7 +69,8 @@ def answer_question(question: str, llm: LLM) -> ChatResult:
 
     rows = [{k: _jsonable(v) for k, v in r.items()} for r in raw]
     columns = list(raw[0].keys()) if raw else []
-    answer = llm.generate_text(prompt.NARRATIVE_SYSTEM, prompt.narrative_user_prompt(question, rows))
+    answer = (llm.generate_text(prompt.NARRATIVE_SYSTEM, prompt.narrative_user_prompt(question, rows))
+              if narrate else "")
     return ChatResult(question=question, status="answered", answer=answer, sql=safe_sql,
                       columns=columns, rows=rows, chart_type=plan.chart_type,
                       explanation=plan.explanation)

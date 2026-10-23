@@ -12,6 +12,7 @@ How well the RevenuePulse chatbot answers, measured, not claimed.
   - A **name** answer is correct if every expected string appears.
   - A **must-refuse** question is correct only if the chatbot refuses.
 - **Errors excluded:** provider errors such as quota limits are excluded from the accuracy figure and reported separately.
+- **No summaries during evals:** the eval skips the 2-line narrative call, because it isn't scored. That makes one model call per question instead of two, so a full run fits in a free-tier daily quota. Use `--narrate` to include it.
 - **Change rules:**
   - Change one thing at a time between runs, and record the prompt version.
   - Questions are frozen once the baseline is logged.
