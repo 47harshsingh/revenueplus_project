@@ -55,7 +55,10 @@ def _quota_info(details) -> tuple[tuple[str, ...], float | None]:
 
 
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-REQUEST_TIMEOUT_MS = 30_000  # google-genai's HttpOptions.timeout is in MILLISECONDS
+# google-genai's HttpOptions.timeout is in MILLISECONDS, and is also sent to Google as the
+# server deadline: a slower answer comes back as "504 Deadline expired", not late. 30 s was too
+# short for our prompt (eval run 4: every call 504'd at ~29 s), so allow 90 s.
+REQUEST_TIMEOUT_MS = 90_000
 
 
 def normalise_model(raw: str | None) -> str:

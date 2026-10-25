@@ -108,7 +108,7 @@ def ask(question: str, llm, retries: int = 1, rate_limit_wait: float = RATE_LIMI
 
 
 def run(questions: list[dict], llm, delay: float, on_result=None,
-        narrate: bool = False) -> list[dict]:
+        narrate: bool = False, retries: int = 1) -> list[dict]:
     """Ask every question. on_result(results) is called after each one, so a run killed by a
     timeout still leaves everything answered so far on disk."""
     results, started = [], time.monotonic()
@@ -116,7 +116,7 @@ def run(questions: list[dict], llm, delay: float, on_result=None,
         if i:
             time.sleep(delay)  # free-tier rate limits (2 model calls per question)
         t0 = time.monotonic()
-        r = ask(q["question"], llm, narrate=narrate)
+        r = ask(q["question"], llm, retries=retries, narrate=narrate)
         ok = None if r["status"] == "error" else score(q["expected"], r)
         results.append({"id": q["id"], "type": q["type"], "question": q["question"],
                         "expected": q["expected"], "correct": ok, **r})
@@ -177,6 +177,9 @@ def main() -> int:
     ap.add_argument("--load", action="store_true", help="rebuild DATABASE_URL with seed data first")
     ap.add_argument("--delay", type=float, default=float(os.environ.get("EVAL_DELAY_SECONDS", 13)))
     ap.add_argument("--only", nargs="*", help="question ids to run (default: all)")
+    ap.add_argument("--retries", type=int, default=1,
+                    help="retries per question on 5xx/timeouts (failed calls count toward "
+                         "the daily quota; use 0 when it is tight)")
     ap.add_argument("--narrate", action="store_true",
                     help="also generate the 2-line summary (not scored; doubles model calls)")
     args = ap.parse_args()
@@ -208,7 +211,8 @@ def main() -> int:
         return summary, md
 
     try:
-        results = run(questions, llm, args.delay, on_result=save, narrate=args.narrate)
+        results = run(questions, llm, args.delay, on_result=save, narrate=args.narrate,
+                      retries=args.retries)
     except EvalAborted as e:
         print(f"\nEVAL ABORTED: {e}", file=sys.stderr)
         return 1

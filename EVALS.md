@@ -13,6 +13,7 @@ How well the RevenuePulse chatbot answers, measured, not claimed.
   - A **must-refuse** question is correct only if the chatbot refuses.
 - **Errors excluded:** provider errors such as quota limits are excluded from the accuracy figure and reported separately.
 - **No summaries during evals:** the eval skips the 2-line narrative call, because it isn't scored. That makes one model call per question instead of two, so a full run fits in a free-tier daily quota. Use `--narrate` to include it.
+- **Free-tier budget:** the first model allowed only 20 requests a day, and failed calls (503/504) count too. Pick a model with 50 or more. `retries` (default 1) can be set to 0 when the quota is tight, and `only` can split a run over 2 days; results are merged by question id.
 - **Change rules:**
   - Change one thing at a time between runs, and record the prompt version.
   - Questions are frozen once the baseline is logged.

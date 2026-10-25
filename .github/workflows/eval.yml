@@ -15,6 +15,10 @@ on:
         description: "Seconds between questions (raise if you hit rate limits)"
         required: false
         default: "13"
+      retries:
+        description: "Retries per question on 5xx/timeouts (failed calls use daily quota)"
+        required: false
+        default: "1"
 
 concurrency:
   group: eval
@@ -58,7 +62,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: >-
-          python -m eval.run_eval --load --delay "${{ inputs.delay || '13' }}"
+          python -m eval.run_eval --load --delay "${{ inputs.delay || '13' }}" --retries "${{ inputs.retries || '1' }}"
           ${{ inputs.only && format('--only {0}', inputs.only) || '' }}
 
       - name: Upload results

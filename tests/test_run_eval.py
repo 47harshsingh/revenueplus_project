@@ -275,3 +275,19 @@ def test_eval_skips_the_unscored_narrative_call(chat_pool):
     assert Counting.texts == 0           # default: 1 model call per question, not 2
     run([q], Counting(), delay=0, narrate=True)
     assert Counting.texts == 1
+
+
+# ---------- run 4: the timeout is a server deadline; retries spend the daily quota ----------
+
+def test_request_timeout_leaves_room_for_slow_models():
+    from api.chat.llm import REQUEST_TIMEOUT_MS
+    assert REQUEST_TIMEOUT_MS >= 60_000  # 30 s made every call 504 in eval run 4
+
+
+def test_zero_retries_makes_one_call_per_question(no_prompt_db, monkeypatch):
+    import eval.run_eval as runner
+    monkeypatch.setattr(runner.time, "sleep", lambda s: None)
+    questions = [q for q in QUESTIONS if q["expected"].get("refused")][:2]
+    llm = FailingLLM(503)
+    results = run(questions, llm, delay=0, retries=0)
+    assert [r["status"] for r in results] == ["error", "error"] and llm.calls == 2
